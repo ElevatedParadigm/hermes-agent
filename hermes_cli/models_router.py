@@ -41,6 +41,11 @@ _TIER_LABELS = {
 # so we let the call run and fall back to the name heuristic naturally instead of special-casing.
 _UNKNOWN_MODELS_DEV_PROVIDERS = {"ollama"}
 
+# Soft context-budget signal: a large input nudges toward high-context tiers. Exposed as a
+# named module constant (not a magic number) so it stays discoverable/tunable without any
+# runtime config plumbing -- see SKILL.md Pitfalls ("soft heuristic, never authoritative").
+_CONTEXT_THRESHOLD_BYTES = 64_000
+
 
 @dataclass
 class RouteDecision:
@@ -167,7 +172,7 @@ def resolve(
     # Score each candidate: tier priority, then context fit, then depth preference.
     def score(alias: str) -> tuple[int, int, int]:
         idx, _ = _tier_of(alias, aliases_config)
-        ctx_penalty = 0 if context_bytes <= 64_000 else (idx + 1)  # large input prefers high tier
+        ctx_penalty = 0 if context_bytes <= _CONTEXT_THRESHOLD_BYTES else (idx + 1)  # large input prefers high tier
         depth_bonus = 0 if not deep_intent else idx * -2         # low index wins when deep
         return (ctx_penalty, depth_bonus, idx)
 
@@ -177,7 +182,7 @@ def resolve(
     reason_bits = [f"tier={_TIER_LABELS.get(best, 'custom')}"]
     if has_vision:
         reason_bits.append("vision attachments")
-    if context_bytes > 64_000:
+    if context_bytes > _CONTEXT_THRESHOLD_BYTES:
         reason_bits.append(f"{context_bytes // 1024}KB input")
     if deep_intent:
         reason_bits.append("deep intent")
