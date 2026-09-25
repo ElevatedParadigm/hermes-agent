@@ -164,6 +164,20 @@ gateway under the backend, and do NOT "fix" update locks by widening the tree-ki
   | shared bot → profile that owns its own bot | routed | receiving adapter | receiving adapter (conversation continuity; #70625's "routed bot" reading was not adopted) |
   | secondary-owned bot → `default` (`bot_profile`) | default (`agent:main`) | receiving adapter | receiving adapter |
   | restored / hand-built, no live provenance | stored `source.profile` | **`None`** | unique owner of `(platform, runtime)`; a disconnected secondary → `None`, never the default bot |
+- **Identity survives the process.** `SessionEntry.transport_profile` (routing index +
+  `sessions.transport_profile`, nullable, reconciled by `SCHEMA_SQL`) persists the receiving bot
+  next to the key namespace; the namespace says where a lane RUNS, the column says which bot may
+  DELIVER to it. Anything reviving a session from durable state (auto-resume, heartbeat restore,
+  plugin injection, background-process events) reads `entry.origin` through
+  `authz_mixin.py::_restored_source`, which re-pins a `RoutingIdentity(transport=None)` via
+  `session_identity.restore_identity`; `_delivery_adapter_for` then delivers through that bot's
+  adapter or nothing (never the default bot by heuristic). Rows without the column (pre-PR-5)
+  keep the `_is_shared_bot_satellite` fallback. Deferred callbacks capture the identity/home at
+  command time (`/model` picker); `_run_in_executor_with_context` carries the scope over thread
+  hops. Relay: `_with_scope` echoes the routed `profile` on every outbound frame and `follow_up`
+  derives it from the key namespace so the connector stamps it on the next `passthrough_forward`.
+  Ambient `get_active_profile_name()` reads in `gateway/` are boot-only and marked
+  `# launch profile, pre-identity`; a path with an identity reads `identity.runtime_profile`.
 - **Token locks.** An adapter that connects with a unique credential (bot token, API key) calls
   `acquire_scoped_lock()` from `gateway.status` in `connect()`/`start()` and `release_scoped_lock()`
   in `disconnect()`/`stop()`, so two profiles cannot share one credential. Canonical:
@@ -196,6 +210,13 @@ gateway under the backend, and do NOT "fix" update locks by widening the tree-ki
   Resolve the owning home from the session record (`profile_home`, `agent:<profile>:` key), never
   from `os.environ`, which holds the launch profile. Why: eviction that flushed under the launch scope
   wrote a secondary profile's memories into the default profile's store, silently.
+- **`api_server` rebuilds the agent per request but not the memory provider.** The adapter bypasses
+  `TurnRunner` and the agent cache (per-request callbacks, model route, ephemeral prompt), so
+  `platforms/api_server_memory_sessions.py` parks each session's initialised `MemoryManager` between
+  requests (exclusive check-out in `_create_agent`, check-in in the turn's `finally`, keyed by profile
+  home + `agent.session_id`; idle/LRU eviction shuts down under the owning home) and
+  `AIAgent(memory_manager=...)` adopts it without a second provider init. Without it the previous
+  turn's queued recall never reaches the next request (#120116).
 - **`multiplex_profiles: false` is not "no scope ever".** A native hosted room serving a second
   profile flips the process-wide guard (`tui_gateway/launch_profile_policy.py::
   activate_multi_profile_hosting`) inside the gateway process, after the adapters were wired; every
@@ -217,6 +238,14 @@ gateway under the backend, and do NOT "fix" update locks by widening the tree-ki
   the default profile only; a secondary enabling one is logged once with the remedy and stamped
   into runtime status (`run_adapters.py::_note_unserved_secondary_platform`). `needs_attention` is
   set and cleared at the single writer (`_update_platform_runtime_status`) on the connect path.
+- **One launch-home identity.** "Does this task serve a routed profile?" compares the override
+  with `hermes_constants.get_routing_process_hermes_home()` (`agent/secret_scope.py::
+  serves_routed_profile` and `_is_process_home`, `tools/environments/local.py::_is_routed_home`,
+  `hermes_cli/env_loader.py::_process_hermes_home`), never with `os.environ["HERMES_HOME"]` read
+  live: an embedding host that mirrors the served profile into the env var per turn (Hermes
+  WebUI) pins its own home with `pin_process_hermes_home()`, and without a pin the resolver is
+  `get_process_hermes_home()` unchanged. Do not add another routing decision that compares
+  against `get_process_hermes_home()` directly; that resolver is for process-level assets.
 
 ## Tests
 
